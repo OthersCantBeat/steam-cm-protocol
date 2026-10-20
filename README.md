@@ -124,12 +124,18 @@ A `SteamClient` has three stages:
 | Command | Effect | Result event |
 | --- | --- | --- |
 | `SetPersonaState(PersonaState)` | Set your online status | — |
+| `AddFriend(u64)` | Send a friend request to a SteamID64 | `FriendRequestResponse` |
+| `RemoveFriend(u64)` | Remove a friend or decline a pending request | `FriendRelationships` |
+| `SetPersonaName { state, name }` | Set status and profile name | — |
+| `SendMessageConfirmed { steamid, message, reply }` | Send a message, outcome via oneshot | `MessageSent` |
+| `GetSteamLevels { steamids, reply }` | Steam levels by SteamID64 | reply via oneshot |
 | `RequestFriendData(Vec<u64>)` | Request persona data for SteamIDs | `PersonaStates` |
 | `GetLibrary` | Load owned + recently-played games | `RecentlyPlayedGames`, then `OwnedGames` |
 | `GetPlayerAchievements(u32)` | Achievements for an appid | `PlayerAchievements` |
 | `SendMessage { steamid, message }` | Send a 1-on-1 chat message | `MessageSent` |
 | `SendTyping { steamid }` | Send a typing indicator (best-effort) | — |
 | `GetRecentMessages { steamid }` | Fetch recent chat history | `RecentMessages` |
+| `GetWebAccessToken { refresh_token, reply }` | Access token for `web::WebSession` (web cookie) | reply via oneshot |
 
 ### Events you receive (`FriendsEvent`)
 
@@ -144,6 +150,31 @@ A `SteamClient` has three stages:
 | `MessageSent(ChatMessage)` | Your send confirmed (with server timestamp) |
 | `TypingNotification { steamid }` | A friend is typing |
 | `RecentMessages { steamid, messages }` | History for one conversation |
+| `FriendRequestResponse { result, steamid, persona_name }` | Steam's response to a friend request (`result == 1` is success) |
+| `FriendRequestsReceived(Vec<u64>)` | Pending incoming friend requests; accept with `AddFriend` |
+| `FriendRelationships { incremental, entries }` | Every friends list entry with its `EFriendRelationship` |
+
+## Interactive bot example
+
+The example starts QR authentication on first run and prints Steam's challenge URL. After login,
+it saves the refresh token to the ignored `.env` file and accepts simple terminal commands. Do not
+commit `.env`; it contains a credential that can access your Steam account.
+
+```bash
+cp .env.example .env
+cargo run --example bot
+```
+
+Commands: `add <SteamID64>`, `ping <SteamID64>` (sends a test message and reports the reply), `image <SteamID64>` (sends the image from `STEAM_IMAGE_PATH`), `msg <SteamID64> <text>`, `history <SteamID64>`, and
+`status <online|offline|busy|away|snooze|trade|play|invisible>`. Set
+`STEAM_TEST_FRIEND_STEAMID` in `.env` to send a request automatically after login. Steam must
+still accept/complete the request, and the other person may need to accept it before chat works.
+Friends can send `!ping` to the bot in Steam chat; it replies with `pong`.
+Incoming friend requests are accepted automatically, followed by `STEAM_WELCOME_MESSAGE` (or a default
+greeting) once Steam confirms the friendship.
+Friends can send `!bild` to receive the image from `STEAM_IMAGE_PATH`. Images go through the Steam
+Community web upload (`web::WebSession`); its cookie is an access token requested over the CM
+connection with `RunCommand::GetWebAccessToken`.
 
 ## Authentication
 

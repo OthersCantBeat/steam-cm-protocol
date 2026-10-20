@@ -34,6 +34,19 @@ message CMsgClientRemoveFriend {
 	optional fixed64 friendid = 1;
 }
 
+message CMsgClientFSGetFriendsSteamLevels {
+	repeated uint32 accountids = 1;
+}
+
+message CMsgClientFSGetFriendsSteamLevelsResponse {
+	message Friend {
+		optional uint32 accountid = 1;
+		optional uint32 level = 2;
+	}
+
+	repeated .CMsgClientFSGetFriendsSteamLevelsResponse.Friend friends = 1;
+}
+
 message CMsgClientHideFriend {
 	optional fixed64 friendid = 1;
 	optional bool hide = 2;
