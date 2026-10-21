@@ -2,7 +2,8 @@ use crate::{
     emsg::EMsg,
     message::Packet,
     protobuf::{
-        CMsgClientChangeStatus, CMsgClientFriendsList, CMsgClientPersonaState,
+        CMsgClientAddFriend, CMsgClientAddFriendResponse, CMsgClientChangeStatus,
+        CMsgClientFriendsList, CMsgClientPersonaState, CMsgClientRemoveFriend,
         CMsgClientRequestFriendData, CMsgProtoBufHeader,
     },
 };
@@ -10,6 +11,8 @@ use crate::{
 // EClientPersonaStateFlag: Status=1 | PlayerName=2 | LastSeen=64 | GameExtraInfo=256
 const PERSONA_STATE_REQUESTED: u32 = 1 | 2 | 64 | 256;
 
+// EFriendRelationship::RequestRecipient (someone sent us a friend request)
+const RELATIONSHIP_REQUEST_RECIPIENT: u32 = 2;
 // EFriendRelationship::Friend
 const RELATIONSHIP_FRIEND: u32 = 3;
 
@@ -142,10 +145,35 @@ pub enum FriendsEvent {
         steamid: u64,
         messages: Vec<crate::chat::ChatMessage>,
     },
+    /// Steam's response to a `AddFriend` request. A successful result means the request was
+    /// accepted by Steam; the other user may still need to accept the friend request.
+    FriendRequestResponse {
+        result: i32,
+        steamid: Option<u64>,
+        persona_name: Option<String>,
+    },
+    /// Users who sent us a friend request. Accept one with `RunCommand::AddFriend`.
+    FriendRequestsReceived(Vec<u64>),
+    /// Raw friends list entries with every relationship (`EFriendRelationship`: 0 none/removed,
+    /// 2 request recipient, 3 friend, 4 request initiator, ...). `incremental: false` is the full
+    /// list sent at logon; incremental updates only carry the changed entries.
+    FriendRelationships {
+        incremental: bool,
+        entries: Vec<(u64, u32)>,
+    },
 }
 
 /// Decode a packet into a FriendsEvent, returning None for unrelated packets.
 pub fn decode(packet: &Packet) -> Option<FriendsEvent> {
+    if packet.emsg == EMsg::ClientAddFriendResponse.raw() {
+        let msg = packet.decode_body::<CMsgClientAddFriendResponse>().ok()?;
+        return Some(FriendsEvent::FriendRequestResponse {
+            result: msg.eresult(),
+            steamid: msg.steam_id_added.filter(|&id| id != 0),
+            persona_name: msg.persona_name_added.filter(|name| !name.is_empty()),
+        });
+    }
+
     if packet.emsg == EMsg::ClientFriendsList.raw() {
         let msg = packet.decode_body::<CMsgClientFriendsList>().ok()?;
         let friends = msg
@@ -184,6 +212,106 @@ pub fn decode(packet: &Packet) -> Option<FriendsEvent> {
     None
 }
 
+/// Decode pending incoming friend requests from a friends list packet. This is separate from
+/// `decode` because the same packet also yields `FriendsEvent::FriendsList`.
+pub fn decode_friend_requests(packet: &Packet) -> Option<FriendsEvent> {
+    if packet.emsg != EMsg::ClientFriendsList.raw() {
+        return None;
+    }
+    let msg = packet.decode_body::<CMsgClientFriendsList>().ok()?;
+    let requests: Vec<u64> = msg
+        .friends
+        .into_iter()
+        .filter(|f| f.efriendrelationship() == RELATIONSHIP_REQUEST_RECIPIENT)
+        .map(|f| f.ulfriendid())
+        .collect();
+    (!requests.is_empty()).then_some(FriendsEvent::FriendRequestsReceived(requests))
+}
+
+/// Decode every entry of a friends list packet, see `FriendsEvent::FriendRelationships`.
+pub fn decode_friend_relationships(packet: &Packet) -> Option<FriendsEvent> {
+    if packet.emsg != EMsg::ClientFriendsList.raw() {
+        return None;
+    }
+    let msg = packet.decode_body::<CMsgClientFriendsList>().ok()?;
+    Some(FriendsEvent::FriendRelationships {
+        incremental: msg.bincremental.unwrap_or(false),
+        entries: msg
+            .friends
+            .into_iter()
+            .map(|f| (f.ulfriendid(), f.efriendrelationship()))
+            .collect(),
+    })
+}
+
+/// Individual SteamID64s are this offset plus the 32-bit account id.
+const STEAMID64_INDIVIDUAL_BASE: u64 = 76561197960265728;
+
+/// Steam levels of the given users (friends or the logged-on user), keyed by SteamID64.
+pub async fn get_steam_levels(
+    connection: &crate::connection::Connection,
+    connection_state: &crate::connection::ConnectionState,
+    steamids: &[u64],
+) -> crate::error::Result<std::collections::HashMap<u64, u32>> {
+    let header = CMsgProtoBufHeader {
+        steamid: connection_state.steamid,
+        client_sessionid: connection_state.client_session_id,
+        ..Default::default()
+    };
+    let body = crate::protobuf::CMsgClientFsGetFriendsSteamLevels {
+        accountids: steamids
+            .iter()
+            .map(|id| id.wrapping_sub(STEAMID64_INDIVIDUAL_BASE) as u32)
+            .collect(),
+    };
+    let packet = connection
+        .request(EMsg::ClientFSGetFriendsSteamLevels, header, &body)
+        .await?;
+    let response =
+        packet.decode_body::<crate::protobuf::CMsgClientFsGetFriendsSteamLevelsResponse>()?;
+    Ok(response
+        .friends
+        .into_iter()
+        .filter_map(|f| {
+            Some((
+                STEAMID64_INDIVIDUAL_BASE + u64::from(f.accountid?),
+                f.level?,
+            ))
+        })
+        .collect())
+}
+
+pub fn build_remove_friend(
+    connection_state: &crate::connection::ConnectionState,
+    steamid: u64,
+) -> (CMsgProtoBufHeader, CMsgClientRemoveFriend) {
+    let header = CMsgProtoBufHeader {
+        steamid: connection_state.steamid,
+        client_sessionid: connection_state.client_session_id,
+        ..Default::default()
+    };
+    let body = CMsgClientRemoveFriend {
+        friendid: Some(steamid),
+    };
+    (header, body)
+}
+
+pub fn build_add_friend(
+    connection_state: &crate::connection::ConnectionState,
+    steamid: u64,
+) -> (CMsgProtoBufHeader, CMsgClientAddFriend) {
+    let header = CMsgProtoBufHeader {
+        steamid: connection_state.steamid,
+        client_sessionid: connection_state.client_session_id,
+        ..Default::default()
+    };
+    let body = CMsgClientAddFriend {
+        steamid_to_add: Some(steamid),
+        ..Default::default()
+    };
+    (header, body)
+}
+
 pub fn build_request_friend_data(
     connection_state: &crate::connection::ConnectionState,
     steamids: Vec<u64>,
@@ -197,6 +325,17 @@ pub fn build_request_friend_data(
         persona_state_requested: Some(PERSONA_STATE_REQUESTED),
         friends: steamids,
     };
+    (header, body)
+}
+
+/// Like `build_change_status`, but also sets the profile name shown to friends.
+pub fn build_change_status_with_name(
+    connection_state: &crate::connection::ConnectionState,
+    state: PersonaState,
+    player_name: String,
+) -> (CMsgProtoBufHeader, CMsgClientChangeStatus) {
+    let (header, mut body) = build_change_status(connection_state, state);
+    body.player_name = Some(player_name);
     (header, body)
 }
 
@@ -286,5 +425,85 @@ mod tests {
             }
             _ => panic!("expected FriendsList"),
         }
+    }
+
+    #[test]
+    fn decodes_incoming_friend_requests() {
+        let mut msg = crate::protobuf::CMsgClientFriendsList::default();
+        // relationship 2 = RequestRecipient, 3 = Friend
+        msg.friends
+            .push(crate::protobuf::c_msg_client_friends_list::Friend {
+                ulfriendid: Some(76561198000000003),
+                efriendrelationship: Some(2),
+            });
+        msg.friends
+            .push(crate::protobuf::c_msg_client_friends_list::Friend {
+                ulfriendid: Some(76561198000000002),
+                efriendrelationship: Some(3),
+            });
+
+        let header = CMsgProtoBufHeader::default();
+        let encoded = encode_message(EMsg::ClientFriendsList, &header, &msg).unwrap();
+        let packets = decode_frame(&encoded).unwrap();
+
+        match decode_friend_requests(&packets[0]) {
+            Some(FriendsEvent::FriendRequestsReceived(ids)) => {
+                assert_eq!(ids, vec![76561198000000003]);
+            }
+            _ => panic!("expected FriendRequestsReceived"),
+        }
+    }
+
+    #[test]
+    fn decodes_all_friend_relationships() {
+        let mut msg = crate::protobuf::CMsgClientFriendsList {
+            bincremental: Some(true),
+            ..Default::default()
+        };
+        msg.friends
+            .push(crate::protobuf::c_msg_client_friends_list::Friend {
+                ulfriendid: Some(76561198000000004),
+                efriendrelationship: Some(0),
+            });
+
+        let header = CMsgProtoBufHeader::default();
+        let encoded = encode_message(EMsg::ClientFriendsList, &header, &msg).unwrap();
+        let packets = decode_frame(&encoded).unwrap();
+
+        match decode_friend_relationships(&packets[0]) {
+            Some(FriendsEvent::FriendRelationships {
+                incremental,
+                entries,
+            }) => {
+                assert!(incremental);
+                assert_eq!(entries, vec![(76561198000000004, 0)]);
+            }
+            _ => panic!("expected FriendRelationships"),
+        }
+    }
+
+    #[test]
+    fn decodes_add_friend_response() {
+        let response = CMsgClientAddFriendResponse {
+            eresult: Some(1),
+            steam_id_added: Some(76561198000000001),
+            persona_name_added: Some("Alice".to_owned()),
+        };
+        let encoded = encode_message(
+            EMsg::ClientAddFriendResponse,
+            &CMsgProtoBufHeader::default(),
+            &response,
+        )
+        .unwrap();
+        let packets = decode_frame(&encoded).unwrap();
+
+        assert!(matches!(
+            decode(&packets[0]),
+            Some(FriendsEvent::FriendRequestResponse {
+                result: 1,
+                steamid: Some(76561198000000001),
+                persona_name: Some(ref name),
+            }) if name == "Alice"
+        ));
     }
 }

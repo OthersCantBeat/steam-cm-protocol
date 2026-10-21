@@ -22,6 +22,7 @@ pub mod protobuf {
 pub mod serverlist;
 pub mod service_method;
 pub mod token;
+pub mod web;
 pub mod transport {
     pub mod websocket;
 }

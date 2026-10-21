@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use tokio::{
-    sync::{Mutex, mpsc},
+    sync::{Mutex, mpsc, oneshot},
     time::{Duration, sleep, timeout},
 };
 
@@ -24,6 +24,7 @@ use crate::{
     },
     serverlist::ServerListCache,
     token::steamid_from_refresh_token,
+    web,
 };
 
 /// Bound the authed `ClientGetLastPlayedTimes` call — short, since Steam normally replies in well
@@ -38,16 +39,53 @@ const LICENSE_LIST_TIMEOUT: Duration = Duration::from_secs(30);
 const CHAT_SEND_TIMEOUT: Duration = Duration::from_secs(10);
 /// Bound the chat history fetch (runs in a spawned task; emits empty on timeout so the UI clears).
 const CHAT_HISTORY_TIMEOUT: Duration = Duration::from_secs(10);
+const WEB_ACCESS_TOKEN_TIMEOUT: Duration = Duration::from_secs(10);
+const STEAM_LEVELS_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug)]
 pub enum RunCommand {
     SetPersonaState(PersonaState),
+    /// Send a Steam friend request to a user by SteamID64.
+    AddFriend(u64),
     RequestFriendData(Vec<u64>),
     GetLibrary,
     GetPlayerAchievements(u32),
-    SendMessage { steamid: u64, message: String },
-    SendTyping { steamid: u64 },
-    GetRecentMessages { steamid: u64 },
+    SendMessage {
+        steamid: u64,
+        message: String,
+    },
+    /// Like `SendMessage`, but reports the outcome to `reply` instead of only logging failures.
+    SendMessageConfirmed {
+        steamid: u64,
+        message: String,
+        reply: oneshot::Sender<Result<crate::chat::ChatMessage>>,
+    },
+    /// Remove a friend (or decline/cancel a pending request).
+    RemoveFriend(u64),
+    /// Set the persona state together with the profile name shown to friends.
+    SetPersonaName {
+        state: PersonaState,
+        name: String,
+    },
+    /// Steam levels of the given users, keyed by SteamID64.
+    GetSteamLevels {
+        steamids: Vec<u64>,
+        reply: oneshot::Sender<Result<HashMap<u64, u32>>>,
+    },
+    SendTyping {
+        steamid: u64,
+    },
+    GetRecentMessages {
+        steamid: u64,
+    },
+    /// Exchange the session's refresh token for an access token usable as web cookie
+    /// (see `web::WebSession`). SteamClient tokens only work over the logged-on CM connection.
+    GetWebAccessToken {
+        refresh_token: String,
+        reply: oneshot::Sender<Result<String>>,
+    },
+    /// Stop the active session loop.
+    Quit,
 }
 
 const PROTOCOL_VERSION: u32 = 65580;
@@ -235,6 +273,13 @@ impl SteamClient {
                                 conn.set_package_ids(package_ids).await;
                             }
 
+                            if let Some(event) = friends::decode_friend_relationships(&pkt) {
+                                let _ = events.send(event);
+                            }
+                            if let Some(event) = friends::decode_friend_requests(&pkt) {
+                                let _ = events.send(event);
+                            }
+
                             if let Some(event) = friends::decode(&pkt) {
                                 // When the friends list arrives, immediately request persona data.
                                 if let friends::FriendsEvent::FriendsList(ref friend_list) = event {
@@ -258,6 +303,12 @@ impl SteamClient {
                 }
                 cmd = commands.recv() => {
                     match cmd {
+                        Some(RunCommand::AddFriend(steamid)) => {
+                            let conn = connection.lock().await;
+                            let conn_state = conn.state_snapshot().await;
+                            let (header, body) = friends::build_add_friend(&conn_state, steamid);
+                            conn.send_message(EMsg::ClientAddFriend, &header, &body).await?;
+                        }
                         Some(RunCommand::SetPersonaState(state)) => {
                             let conn = connection.lock().await;
                             let conn_state = conn.state_snapshot().await;
@@ -384,6 +435,68 @@ impl SteamClient {
                                 });
                             });
                         }
+                        Some(RunCommand::SendMessageConfirmed { steamid, message, reply }) => {
+                            // Spawned so a caller waiting on the reply never blocks the select loop.
+                            let connection_clone = Arc::clone(&connection);
+                            let events_clone = events.clone();
+                            tokio::spawn(async move {
+                                let result = {
+                                    let conn = connection_clone.lock().await;
+                                    let state = conn.state_snapshot().await;
+                                    timeout(CHAT_SEND_TIMEOUT, chat::send_message(&conn, &state, steamid, message))
+                                        .await
+                                        .unwrap_or_else(|_| Err(Error::Transport("SendMessage timed out".to_owned())))
+                                };
+                                if let Ok(sent) = &result {
+                                    let _ = events_clone.send(friends::FriendsEvent::MessageSent(sent.clone()));
+                                }
+                                let _ = reply.send(result);
+                            });
+                        }
+                        Some(RunCommand::RemoveFriend(steamid)) => {
+                            let conn = connection.lock().await;
+                            let conn_state = conn.state_snapshot().await;
+                            let (header, body) = friends::build_remove_friend(&conn_state, steamid);
+                            conn.send_message(EMsg::ClientRemoveFriend, &header, &body).await?;
+                        }
+                        Some(RunCommand::SetPersonaName { state, name }) => {
+                            let conn = connection.lock().await;
+                            let conn_state = conn.state_snapshot().await;
+                            let (header, body) = friends::build_change_status_with_name(&conn_state, state, name);
+                            conn.send_message(EMsg::ClientChangeStatus, &header, &body).await?;
+                        }
+                        Some(RunCommand::GetSteamLevels { steamids, reply }) => {
+                            let connection_clone = Arc::clone(&connection);
+                            tokio::spawn(async move {
+                                let result = {
+                                    let conn = connection_clone.lock().await;
+                                    let state = conn.state_snapshot().await;
+                                    timeout(STEAM_LEVELS_TIMEOUT, friends::get_steam_levels(&conn, &state, &steamids))
+                                        .await
+                                        .unwrap_or_else(|_| Err(Error::Transport("GetSteamLevels timed out".to_owned())))
+                                };
+                                let _ = reply.send(result);
+                            });
+                        }
+                        Some(RunCommand::GetWebAccessToken { refresh_token, reply }) => {
+                            let connection_clone = Arc::clone(&connection);
+                            tokio::spawn(async move {
+                                let result = {
+                                    let conn = connection_clone.lock().await;
+                                    let state = conn.state_snapshot().await;
+                                    timeout(
+                                        WEB_ACCESS_TOKEN_TIMEOUT,
+                                        web::generate_access_token(&conn, &state, &refresh_token),
+                                    )
+                                    .await
+                                    .unwrap_or_else(|_| {
+                                        Err(Error::Transport("GenerateAccessTokenForApp timed out".to_owned()))
+                                    })
+                                };
+                                let _ = reply.send(result);
+                            });
+                        }
+                        Some(RunCommand::Quit) => return Ok(()),
                         None => return Ok(()),
                     }
                 }
