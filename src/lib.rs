@@ -6,6 +6,7 @@ pub mod auth {
     pub mod qr;
 }
 pub mod chat;
+pub mod chatroom;
 pub mod client;
 pub mod connection;
 pub mod emsg;

@@ -12,7 +12,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::{
     achievements,
     auth::{credentials, qr},
-    chat,
+    chat, chatroom,
     connection::Connection,
     emsg::EMsg,
     error::{Error, Result},
@@ -40,6 +40,7 @@ const CHAT_SEND_TIMEOUT: Duration = Duration::from_secs(10);
 /// Bound the chat history fetch (runs in a spawned task; emits empty on timeout so the UI clears).
 const CHAT_HISTORY_TIMEOUT: Duration = Duration::from_secs(10);
 const WEB_ACCESS_TOKEN_TIMEOUT: Duration = Duration::from_secs(10);
+const CHAT_ROOM_TIMEOUT: Duration = Duration::from_secs(10);
 const STEAM_LEVELS_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug)]
@@ -83,6 +84,18 @@ pub enum RunCommand {
     GetWebAccessToken {
         refresh_token: String,
         reply: oneshot::Sender<Result<String>>,
+    },
+    /// Resolve a community chat invite link code (see `chatroom::parse_invite_code`).
+    GetChatInviteLink {
+        invite_code: String,
+        reply: oneshot::Sender<Result<crate::chatroom::ChatInviteLink>>,
+    },
+    /// Invite a friend into a community chat room group (`chat_id` 0/None: default room).
+    InviteToChatRoomGroup {
+        steamid: u64,
+        chat_group_id: u64,
+        chat_id: Option<u64>,
+        reply: oneshot::Sender<Result<()>>,
     },
     /// Stop the active session loop.
     Quit,
@@ -492,6 +505,35 @@ impl SteamClient {
                                     .unwrap_or_else(|_| {
                                         Err(Error::Transport("GenerateAccessTokenForApp timed out".to_owned()))
                                     })
+                                };
+                                let _ = reply.send(result);
+                            });
+                        }
+                        Some(RunCommand::GetChatInviteLink { invite_code, reply }) => {
+                            let connection_clone = Arc::clone(&connection);
+                            tokio::spawn(async move {
+                                let result = {
+                                    let conn = connection_clone.lock().await;
+                                    let state = conn.state_snapshot().await;
+                                    timeout(CHAT_ROOM_TIMEOUT, chatroom::get_invite_link_info(&conn, &state, &invite_code))
+                                        .await
+                                        .unwrap_or_else(|_| Err(Error::Transport("GetInviteLinkInfo timed out".to_owned())))
+                                };
+                                let _ = reply.send(result);
+                            });
+                        }
+                        Some(RunCommand::InviteToChatRoomGroup { steamid, chat_group_id, chat_id, reply }) => {
+                            let connection_clone = Arc::clone(&connection);
+                            tokio::spawn(async move {
+                                let result = {
+                                    let conn = connection_clone.lock().await;
+                                    let state = conn.state_snapshot().await;
+                                    timeout(
+                                        CHAT_ROOM_TIMEOUT,
+                                        chatroom::invite_friend_to_group(&conn, &state, chat_group_id, chat_id, steamid),
+                                    )
+                                    .await
+                                    .unwrap_or_else(|_| Err(Error::Transport("InviteFriendToChatRoomGroup timed out".to_owned())))
                                 };
                                 let _ = reply.send(result);
                             });
