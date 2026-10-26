@@ -15,8 +15,10 @@ env:
 
 jobs:
   prepare:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
+    # Public repo: PRs from forks never run on the own runner.
     if: |
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
       !contains(format('{0} {1} {2}', github.event.head_commit.message, github.event.pull_request.title, github.event.pull_request.body), '[skip ci]')
     steps:
       - run: |
@@ -28,7 +30,7 @@ jobs:
 
   fmt:
     name: Rustfmt
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     needs: prepare
     steps:
       - uses: actions/checkout@v7
@@ -39,7 +41,7 @@ jobs:
 
   clippy:
     name: Clippy
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     needs: prepare
     steps:
       - uses: actions/checkout@v7
@@ -51,7 +53,7 @@ jobs:
 
   test:
     name: Test Suite
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     needs: prepare
     steps:
       - uses: actions/checkout@v7
@@ -61,7 +63,7 @@ jobs:
 
   package:
     name: Package Check
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     needs: prepare
     steps:
       - uses: actions/checkout@v7
@@ -73,7 +75,7 @@ jobs:
   # Major bumps stay open for review.
   dependabot:
     name: Dependabot auto-merge
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     needs: [fmt, clippy, test, package]
     if: github.event_name == 'pull_request' && github.actor == 'dependabot[bot]'
     permissions:
