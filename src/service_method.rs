@@ -3,7 +3,7 @@ use prost::Message;
 use crate::{
     connection::{Connection, ConnectionState},
     emsg::EMsg,
-    error::Result,
+    error::{Error, Result},
     protobuf::CMsgProtoBufHeader,
 };
 
@@ -68,5 +68,47 @@ where
         )
         .await?;
 
+    packet.decode_body::<Resp>()
+}
+
+/// Like `call_authed`, but fails when Steam answers with an EResult other than OK. Methods
+/// with an empty response (e.g. invites) otherwise "succeed" silently on errors.
+pub async fn call_authed_checked<Req, Resp>(
+    connection: &Connection,
+    state: &ConnectionState,
+    method: &ServiceMethod,
+    request: &Req,
+) -> Result<Resp>
+where
+    Req: Message,
+    Resp: Message + Default,
+{
+    let packet = connection
+        .request(
+            EMsg::ServiceMethodCallFromClient,
+            CMsgProtoBufHeader {
+                steamid: state.steamid,
+                client_sessionid: state.client_session_id,
+                target_job_name: Some(method.target_job_name.clone()),
+                ..Default::default()
+            },
+            request,
+        )
+        .await?;
+
+    let eresult = packet.header.eresult.unwrap_or(1);
+    if eresult != 1 {
+        let detail = packet
+            .header
+            .error_message
+            .as_deref()
+            .filter(|m| !m.is_empty())
+            .map(|m| format!(": {m}"))
+            .unwrap_or_default();
+        return Err(Error::Protocol(format!(
+            "{} failed with EResult {eresult}{detail}",
+            method.target_job_name
+        )));
+    }
     packet.decode_body::<Resp>()
 }

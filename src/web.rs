@@ -20,6 +20,7 @@ const GENERATE_ACCESS_TOKEN_METHOD: &str = "Authentication.GenerateAccessTokenFo
 const BEGIN_FILE_UPLOAD_URL: &str = "https://steamcommunity.com/chat/beginfileupload/?l=english";
 const COMMIT_FILE_UPLOAD_URL: &str = "https://steamcommunity.com/chat/commitfileupload/";
 const CHAT_REFERER: &str = "https://steamcommunity.com/chat/";
+const GROUP_INVITE_URL: &str = "https://steamcommunity.com/actions/GroupInvite";
 
 pub struct WebSession {
     http: reqwest::Client,
@@ -201,6 +202,31 @@ impl WebSession {
             ))
     }
 
+    /// Invite `invitee` into the Steam group `group_id` (SteamID64 of the group, `10358279…`).
+    /// The account must be a member allowed to invite; Steam's reason is returned on failure,
+    /// e.g. when the user is already a member or was invited before.
+    pub async fn invite_user_to_group(&self, group_id: u64, invitee: u64) -> Result<()> {
+        let group = group_id.to_string();
+        let invitee = invitee.to_string();
+        let response = self
+            .http
+            .post(GROUP_INVITE_URL)
+            .header(reqwest::header::COOKIE, &self.cookie)
+            .header(reqwest::header::REFERER, "https://steamcommunity.com/")
+            .form(&[
+                ("json", "1"),
+                ("type", "groupInvite"),
+                ("group", group.as_str()),
+                ("invitee", invitee.as_str()),
+                ("sessionID", self.session_id.as_str()),
+            ])
+            .send()
+            .await?;
+        let status = response.status();
+        let body = response.text().await?;
+        group_invite_result(status, &body)
+    }
+
     async fn community_post<T: serde::de::DeserializeOwned>(
         &self,
         url: &str,
@@ -250,6 +276,31 @@ pub async fn generate_access_token(
         ))
 }
 
+/// Interprets the GroupInvite answer: `{"results":"OK"}` on success, otherwise `results`
+/// carries Steam's (English) reason. A login page instead of JSON means the cookie is stale.
+fn group_invite_result(status: reqwest::StatusCode, body: &str) -> Result<()> {
+    #[derive(Deserialize)]
+    struct GroupInviteResponse {
+        results: Option<serde_json::Value>,
+    }
+    let parsed: GroupInviteResponse = serde_json::from_str(body).map_err(|_| {
+        let excerpt: String = body.chars().take(200).collect();
+        Error::Protocol(format!(
+            "GroupInvite returned HTTP {status}, no JSON (web session expired?): {excerpt}"
+        ))
+    })?;
+    match parsed.results {
+        Some(serde_json::Value::String(r)) if r == "OK" => Ok(()),
+        Some(other) => Err(Error::Protocol(format!(
+            "GroupInvite failed: {}",
+            json_scalar(&other)
+        ))),
+        None => Err(Error::Protocol(format!(
+            "GroupInvite returned HTTP {status} without a result"
+        ))),
+    }
+}
+
 /// Steam returns ids and timestamps sometimes as numbers and sometimes as strings.
 fn json_scalar(value: &serde_json::Value) -> String {
     match value {
@@ -263,4 +314,21 @@ fn unix_millis() -> u128 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn group_invite_results() {
+        let ok = reqwest::StatusCode::OK;
+        assert!(group_invite_result(ok, r#"{"results":"OK","groupId":"1"}"#).is_ok());
+        let err = group_invite_result(ok, r#"{"results":"The user is already a member"}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("already a member"), "{err}");
+        assert!(group_invite_result(ok, "<html>login</html>").is_err());
+        assert!(group_invite_result(ok, "{}").is_err());
+    }
 }
