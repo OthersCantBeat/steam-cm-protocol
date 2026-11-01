@@ -24,6 +24,8 @@ pub enum EMsg {
     ClientRequestFriendData = 815,
     ClientGetUserStats = 818,
     ClientGetUserStatsResponse = 819,
+    ClientToGC = 5452,
+    ClientFromGC = 5453,
     ClientLogon = 5514,
     ClientFSGetFriendsSteamLevels = 7528,
     ClientFSGetFriendsSteamLevelsResponse = 7529,
