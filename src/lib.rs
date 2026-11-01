@@ -13,6 +13,7 @@ pub mod emsg;
 pub mod eresult;
 pub mod error;
 pub mod friends;
+pub mod gc;
 pub(crate) mod kv;
 pub mod library;
 pub mod message;
@@ -34,3 +35,4 @@ pub use error::{Error, Result};
 pub use friends::{
     Friend, FriendsEvent, LaunchEntry, Persona, PersonaState, ProtocolAchievement, ProtocolGame,
 };
+pub use gc::{Cs2Match, Cs2MatchRequest};

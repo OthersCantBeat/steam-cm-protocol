@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- `RunCommand::RequestCs2Match`: asks the CS2 Game Coordinator for a match (demo URL, match time) through a GC session that opens on demand.
+
 
 ## [v0.4.1] - 2026-06-09
 

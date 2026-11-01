@@ -17,7 +17,7 @@ use crate::{
     emsg::EMsg,
     error::{Error, Result},
     friends::{self, PersonaState},
-    library, pics,
+    gc, library, pics,
     protobuf::{
         CAuthenticationDeviceDetails, CMsgClientHello, CMsgClientLicenseList, CMsgClientLogon,
         CMsgClientLogonResponse, CMsgProtoBufHeader, EAuthTokenPlatformType,
@@ -96,6 +96,12 @@ pub enum RunCommand {
         chat_group_id: u64,
         chat_id: Option<u64>,
         reply: oneshot::Sender<Result<()>>,
+    },
+    /// Ask the CS2 Game Coordinator for a match. The account shows as playing CS2 while
+    /// the GC session is open and must own the (free) game.
+    RequestCs2Match {
+        request: gc::Cs2MatchRequest,
+        reply: oneshot::Sender<Result<gc::Cs2Match>>,
     },
     /// Stop the active session loop.
     Quit,
@@ -274,11 +280,22 @@ impl SteamClient {
                 .await?;
         }
 
+        // Both tasks end with this function, when the channels are dropped.
+        let (gc_jobs, gc_jobs_rx) = mpsc::unbounded_channel();
+        let (gc_incoming, gc_incoming_rx) = mpsc::unbounded_channel();
+        let (gc_out, gc_out_rx) = mpsc::unbounded_channel();
+        tokio::spawn(gc::run_worker(gc_jobs_rx, gc_incoming_rx, gc_out));
+        tokio::spawn(gc::forward_outgoing(Arc::clone(&connection), gc_out_rx));
+
         loop {
             tokio::select! {
                 packet = incoming.recv() => {
                     match packet {
                         Some(Ok(pkt)) => {
+                            if let Some(message) = gc::decode_from_gc(&pkt) {
+                                let _ = gc_incoming.send(message);
+                            }
+
                             if pkt.emsg == EMsg::ClientLicenseList.raw()
                                 && let Some(package_ids) = decode_license_list_packages(&pkt)
                             {
@@ -316,6 +333,10 @@ impl SteamClient {
                 }
                 cmd = commands.recv() => {
                     match cmd {
+                        Some(RunCommand::RequestCs2Match { request, reply }) => {
+                            // A dropped reply tells the caller the session is gone.
+                            let _ = gc_jobs.send(gc::Job { request, reply });
+                        }
                         Some(RunCommand::AddFriend(steamid)) => {
                             let conn = connection.lock().await;
                             let conn_state = conn.state_snapshot().await;

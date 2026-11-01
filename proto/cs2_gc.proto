@@ -1,0 +1,52 @@
+// Game Coordinator messages for CS2, reduced to what fetching a match's demo URL
+// needs. Field numbers follow SteamDatabase/Protobufs (steam/steammessages_clientserver_2.proto,
+// csgo/gcsdk_gcmessages.proto, csgo/cstrike15_gcmessages.proto).
+syntax = "proto2";
+
+message CMsgGCClient {
+	optional uint32 appid = 1;
+	optional uint32 msgtype = 2;
+	optional bytes payload = 3;
+	optional fixed64 steamid = 4;
+	optional string gcname = 5;
+}
+
+// CMsgClientHello of the GC SDK; renamed, the CM protocol has its own CMsgClientHello.
+message CMsgGCClientHello {
+	optional uint32 version = 1;
+	optional uint32 client_session_need = 3;
+	optional uint32 client_launcher = 4;
+	optional uint32 steam_launcher = 9;
+}
+
+// CMsgConnectionStatus of the GC SDK; status 0 = GCConnectionStatus_HAVE_SESSION.
+message CMsgGCConnectionStatus {
+	optional uint32 status = 1;
+}
+
+message CMsgGCCStrike15_v2_MatchListRequestFullGameInfo {
+	optional uint64 matchid = 1;
+	optional uint64 outcomeid = 2;
+	optional uint32 token = 3;
+}
+
+message CMsgGCCStrike15_v2_MatchmakingServerRoundStats {
+	optional uint64 reservationid = 1;
+	// Despite its name: the demo URL in the last round of a finished match.
+	optional string map = 3;
+	optional int32 round = 4;
+}
+
+message CDataGCCStrike15_v2_MatchInfo {
+	optional uint64 matchid = 1;
+	optional uint32 matchtime = 2;
+	optional CMsgGCCStrike15_v2_MatchmakingServerRoundStats roundstats_legacy = 4;
+	repeated CMsgGCCStrike15_v2_MatchmakingServerRoundStats roundstatsall = 5;
+}
+
+message CMsgGCCStrike15_v2_MatchList {
+	optional uint32 msgrequestid = 1;
+	optional uint32 accountid = 2;
+	optional uint32 servertime = 3;
+	repeated CDataGCCStrike15_v2_MatchInfo matches = 4;
+}
