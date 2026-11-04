@@ -66,7 +66,11 @@ pub struct Friend {
 pub struct Persona {
     pub steamid: u64,
     pub name: String,
+    /// Only meaningful when `state_present` is true; a missing field decodes as Offline.
     pub state: PersonaState,
+    /// True when this update included the persona state. Steam sends partial
+    /// updates (e.g. only name or avatar); those must not be read as Offline.
+    pub state_present: bool,
     pub game_app_id: Option<u32>,
     pub game_name: Option<String>,
     pub avatar_hash: Option<Vec<u8>>,
@@ -198,6 +202,7 @@ pub fn decode(packet: &Packet) -> Option<FriendsEvent> {
                 Persona {
                     steamid: f.friendid(),
                     state: PersonaState::from_raw(f.persona_state()),
+                    state_present: f.persona_state.is_some(),
                     name: f.player_name.unwrap_or_default(),
                     game_app_id: f.game_played_app_id.filter(|&id| id != 0),
                     game_name: f.game_name.filter(|s| !s.is_empty()),
@@ -390,9 +395,29 @@ mod tests {
                 assert_eq!(personas[0].steamid, 76561198000000001);
                 assert_eq!(personas[0].name, "Alice");
                 assert_eq!(personas[0].state, PersonaState::Online);
+                assert!(personas[0].state_present);
                 assert_eq!(personas[0].game_app_id, Some(220));
                 assert_eq!(personas[0].game_name.as_deref(), Some("Half-Life 2"));
                 assert!(personas[0].game_fields_present);
+            }
+            _ => panic!("expected PersonaStates"),
+        }
+    }
+
+    #[test]
+    fn partial_persona_update_has_no_state() {
+        let mut msg = CMsgClientPersonaState::default();
+        msg.friends.push(crate::protobuf::c_msg_client_persona_state::Friend {
+            friendid: Some(76561198000000001),
+            player_name: Some("Alice".to_owned()),
+            ..Default::default()
+        });
+        let encoded = encode_message(EMsg::ClientPersonaState, &CMsgProtoBufHeader::default(), &msg).unwrap();
+        let packets = decode_frame(&encoded).unwrap();
+        match decode(&packets[0]).expect("should decode as FriendsEvent") {
+            FriendsEvent::PersonaStates(personas) => {
+                assert_eq!(personas[0].name, "Alice");
+                assert!(!personas[0].state_present);
             }
             _ => panic!("expected PersonaStates"),
         }
