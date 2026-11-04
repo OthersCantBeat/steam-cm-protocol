@@ -14,7 +14,7 @@ env:
 jobs:
   verify:
     name: Verify Release
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -28,7 +28,7 @@ jobs:
 
   release:
     name: Create GitHub Release
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     needs: verify
     permissions:
       contents: write
@@ -67,7 +67,7 @@ jobs:
 
   publish-cargo:
     name: Publish to crates.io
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     needs: release
     if: ${{ !contains(github.ref_name, '-') }}
     steps:

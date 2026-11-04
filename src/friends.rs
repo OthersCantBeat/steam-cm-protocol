@@ -407,12 +407,18 @@ mod tests {
     #[test]
     fn partial_persona_update_has_no_state() {
         let mut msg = CMsgClientPersonaState::default();
-        msg.friends.push(crate::protobuf::c_msg_client_persona_state::Friend {
-            friendid: Some(76561198000000001),
-            player_name: Some("Alice".to_owned()),
-            ..Default::default()
-        });
-        let encoded = encode_message(EMsg::ClientPersonaState, &CMsgProtoBufHeader::default(), &msg).unwrap();
+        msg.friends
+            .push(crate::protobuf::c_msg_client_persona_state::Friend {
+                friendid: Some(76561198000000001),
+                player_name: Some("Alice".to_owned()),
+                ..Default::default()
+            });
+        let encoded = encode_message(
+            EMsg::ClientPersonaState,
+            &CMsgProtoBufHeader::default(),
+            &msg,
+        )
+        .unwrap();
         let packets = decode_frame(&encoded).unwrap();
         match decode(&packets[0]).expect("should decode as FriendsEvent") {
             FriendsEvent::PersonaStates(personas) => {
